@@ -160,6 +160,54 @@ static char *ExTree_traverse_preorder(ExTree ex_tree, char **string_ref){
     return *string_ref;
 }
 
+// declaration here because it's used in the following function; (defined in down below in
+// the file, in another section)
+static bool ExP_is_operator(char the_char);
+
+static char *ExTree_traverse_inorder(ExTree ex_tree, char **string_ref){
+    /* This modifies the string that string_ref points to back in caller space.
+       Thus the caller should mainting two pointers to its string. 
+
+       One to be modified by ExTree_traverse_preorder() and one kept intact,
+       out of harm's way.
+    */
+    if (!ex_tree){
+        return NULL;
+    }
+
+    // only insert parentheses if the current token is an operator 
+    // this bool will be checked twice below to determine the insertion of both
+    // the opening and the closing parenthesis
+    bool parentheses = false; 
+    parentheses = ExP_is_operator(ex_tree->token[0]);
+
+    // copy the token in the current tree node into the array
+    if (parentheses){
+        *(*string_ref) = '(';
+        (*string_ref)++;    // move forward in the string;
+    }
+    ExTree_traverse_inorder(ex_tree->left, string_ref);
+
+    // how many characters the token consisted of+1 (when the token string reached NULL,
+    // and the index stopped incrementing in str_copy())
+    int32_t copied = str_copy(*string_ref, ex_tree->token);
+    (*string_ref)+= copied;
+
+    // return a pointer in the newly formed expression, where the computing left off
+    // the whole expression ahs been computed. The caller should use this poimnter
+    // to insert a NULL there and terminate the string
+    ExTree_traverse_inorder(ex_tree->right, string_ref);
+
+    // add closing parenthesis as well (if parentheses is true)
+    if (parentheses){
+        *(*string_ref) = ')';
+        (*string_ref)++;
+    }
+
+    return *string_ref;
+}
+
+
 
 
 /*               * * * ExP functions * * *                         */
@@ -247,12 +295,13 @@ static char *ExP_refine(char *unformatted, ex_notation NOTATION){
         }
 
     uint32_t ind_refined = 0;   // track the position in the 'refined' array
+    refined[ind_refined] = '\0';    // initialize to NUL
 
     for (uint32_t i = 0; unformatted[i] != '\0'; i++){
 
         if(unformatted[i] == ' '){
             // don't add space if there's one just before
-            if (refined[ind_refined-1] != ' '){     // if the previous char is not whitespace
+            if (ind_refined > 0 && refined[ind_refined-1] != ' '){     // if the previous char is not whitespace
                 refined[ind_refined] = ' ';     // then add whitespace here
                 ind_refined++;
             }
@@ -378,6 +427,7 @@ static ExTree ExP_parse_postfix(char postfix_expression[]){
 
     postfix_expression = ExP_refine(postfix_expression, POSTFIX); 
     char *current = ExP_tokenize(postfix_expression, ' ');
+
     while(current){
         if(!ExP_is_operator(current[0])){
             // make current a new tree with no children
@@ -410,6 +460,7 @@ static ExTree ExP_parse_postfix(char postfix_expression[]){
             current = ExP_tokenize(NULL, ' '); 
         }
     }
+    Stack_destroy(&operands_stack);
     return result; 
 }
 
@@ -480,6 +531,9 @@ static ExTree ExP_parse_prefix(char* exp){
     // if the current char in exp is NULL : end of the expression 
     
     exp = ExP_refine(exp, PREFIX);
+    if (!exp){
+        return NULL;
+    }
     char *token = ExP_tokenize(exp, ' ');
     ExTree expression_tree = NULL;
     ExP_prefix_build_et(&expression_tree, token);
@@ -605,6 +659,44 @@ char *ExP_to_prefix(char expression[]){
     return intact;
 }
 
+
+char *ExP_to_infix(char expression[], ex_notation NOTATION){
+    /* Convert from expression to postfix */
+
+    // make it twice the size of expression, to play it safe and be able to add proper
+    // spacing
+    uint8_t size = str_len(expression) * 2;
+
+    // this pointer will be changed by ExTree_traverse_postorder()
+    // so a second pointer, left intact, pointing to the start of the string, is needed
+    char *changeable = malloc(sizeof(char) * size); 
+    char *intact = changeable;
+
+
+    if(!changeable){
+        return NULL;
+    }
+    
+    ExTree expression_tree = NULL;
+    if (NOTATION == PREFIX){
+        expression_tree = ExP_parse_prefix(expression);
+    }else if (NOTATION == POSTFIX){
+        expression_tree = ExP_parse_postfix(expression);
+    }
+    ExTree_traverse_inorder(expression_tree, &changeable);
+
+    // changeable will at this point point to where a terminating null needs to be
+    // inserted.
+    *changeable= '\0';
+    // since ExTree_traverse_preorder (and postorder) insert a whitespace char before
+    // every token in the expression tree, the first char in the string will be
+    // whitespace.
+    // remove that
+    intact++;
+
+    // intact was left intact, so it sstill points to the start of the string
+    return intact;
+}
 
 
 

@@ -28,5 +28,5 @@ char *ExP_to_postfix(char expression[]);
 /* Convert a postfix expression to a prefix expression */
 char *ExP_to_prefix(char expression[]);
 
-
-
+/* Convert a postfix or prefix expression to an infix notation expression */
+char *ExP_to_infix(char expression[], ex_notation NOTATION);
