@@ -13,7 +13,7 @@
 /*
    ExP = expression parser
    ExTree = expression tree
-
+    et ( in ExP_prefix_build_et() ) = ditto
 */
 
 
@@ -415,6 +415,14 @@ static ExTree ExP_parse_postfix(char postfix_expression[]){
 
 
 static void ExP_prefix_build_et(ExTree *tree_ref, char *token){
+    /* Called from inside ExP_parse_prefix(). 
+
+       It returns nothing, as it builds a tree back in the caller's space,
+       as it traverses it.
+
+       Used to build the expression tree for ExP_parse_prefix(). The calling
+       function in this case serves as a nonlocal-scope providing wrapper.
+    */
     if (!token){ // token is NULL
        return; 
     }
