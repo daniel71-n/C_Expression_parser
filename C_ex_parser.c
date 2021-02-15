@@ -13,7 +13,8 @@
 /*
    ExP = expression parser
    ExTree = expression tree
-    et ( in ExP_prefix_build_et() ) = ditto
+   et ( in ExP_prefix_build_et() ) = ditto
+   PV = previous version
 */
 
 
@@ -21,12 +22,38 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 /* ------------------ Structs and Typedefs ------------------- */
 
+// actual Expression tree that gets built, traversed, and deallocated at the end
 typedef struct expression_tree *ExTree;
+
+
+/* A wrapper struct with a pointer to an ExTree that it's associated with, and a pointer
+   to the expression string that the ExTree is built from (this expression string is a dynamically
+   allocated char array returned by ExP_refine() ). 
+   The purpose of this wrapper is primarily to track that expression string 
+   (char array) ptr so that it can get freed together with the tree itself when the 
+   tree gets deallocated. 
+   ExTreeWrapper is passed to tree_destroy() and tree_init().
+   The member pointer expression_tree is what gets passed to all the tree-handling functions.
+*/
+typedef struct expression_tree_wrapper *ExTreeWrapper;
+
+
 struct expression_tree{
     char *token;    // a string (char pointer) as a token (substring) in an expression string
     ExTree left;
     ExTree right;
 };
+
+struct expression_tree_wrapper{
+    char *expression_string;   // the expression that expression_tree was built from
+    ExTree expression_tree;     // the expression tree built from the expression string
+};
+
+
+// --------------------------------------------------------------------------------
+// ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+// --------------------------------------------------------------------------------
+
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -34,6 +61,35 @@ struct expression_tree{
 
 
 /*               * * * ExTree functions * * *                         */
+
+
+static void ExTree_init(ExTreeWrapper *tree_wrapper, char *expression_string){
+    /* Initialize an ExTreeWrapper.
+       Specifically--
+       - allocate memory to an ExTreeWrapper pointer
+       - set its expression_tree member to NULL
+       - set its expression_string member to the second argument
+
+       The whole point of this wrapper is essentially the expression_string
+       field. That way, when ExTree_destroy() is called to tear down the 
+       expression tree, deallocating all the associated memory, the memory
+       associated with expression_string will also get deallocated,
+       avoiding any memory leaks. 
+       In other words, it makes for added convenience and consistency
+       as far as keeping track of the memory that needs to be deallocated.
+       Otherwise, it's not actually needed for any tree-specific handling.
+    */
+    ExTreeWrapper temp = malloc(sizeof(struct expression_tree_wrapper));
+    if (!temp){
+        *tree_wrapper = NULL;
+        return;
+    }
+    *tree_wrapper = temp;
+
+    (*tree_wrapper)->expression_tree = NULL;
+    (*tree_wrapper)->expression_string = expression_string;
+}
+
 
 static ExTree ExTree_new(char *token){
     /* Allocate memory for a new tree, initialize the 
@@ -77,37 +133,49 @@ static ExTree ExTree_insert_left(ExTree tree, ExTree left_child){
 
 // forward declaration of ExP_eval, since it's defined down below in the next section,
 // but referred to in t he body of ExTree_traverse()
-static char *ExP_eval(char *operator, char *left_operand, char *right_operand);
+static int32_t ExP_eval(char *operator, int32_t left_operand, int32_t right_operand);
 //
-static char *ExTree_traverse(ExTree tree){
+static int32_t ExTree_traverse(ExTree tree){
     /* Traverse the expression tree 'tree', and compute a 
        result, then return it. 
 
-       The traversal order - in-order, pre-order, post-order
-       corresonds to the expression notation : infix, prefix,
-       and postfix, respectively. 
 
-       This makes it straightforward to convert between notations.
+       ******** IMPLEMENTATION NOTES *********
 
-       It takes an Extree and returns a string (char array).
+       The initial idea was for it to return a char array,
+       and ExP_eval() would also take char array arguments,
+       internally converting them to integers by calling 
+       str_to_int(). That worked well, except str_to_int()
+       dynamically allocates memory for a char array and returns it.
+       That proved to be a huge pain in terms of freeing all that memory,
+       leading to a lot of memory leaks. Memory couldn't conveniently
+       be freed. 
+       So instead I decided to change both ExP_eval() and ExTree_traverse:
+       the former takes int-type operands instead of char array-operands,
+       and the latter returns an int (int32_t) type. The operand tokens
+       are converted to ints with str_to_int() before being passed to
+       ExP_eval(), thus essentially doing the exact opposite of the
+       initial implementation.
     */
     if(tree->left == NULL && tree->right == NULL){
-        return tree->token;
+        return str_to_int(tree->token);
     }
     else{
-        char *left = ExTree_traverse(tree->left); 
-        char *right = ExTree_traverse(tree->right);
-        char *res = ExP_eval(tree->token, left, right);
+        int32_t left = ExTree_traverse(tree->left); 
+        int32_t right = ExTree_traverse(tree->right);
+        int32_t res = ExP_eval(tree->token, left, right);
         return res;
+
     }
 }
 
 static char *ExTree_traverse_postorder(ExTree ex_tree, char **string_ref){
-    /* This modifies the string that string_ref points to back in caller space.
-       Thus the caller should mainting two pointers to its string. 
-
-       One to be modified by ExTree_traverse_post_order() and one kept intact,
-       out of harm's way.
+    /* Traverse the expression tree ex_tree in post-order, building
+       a postfix expression, stored in *string_ref. 
+       
+       This modifies the string that string_ref points to back in caller space.
+       Thus the caller should mainting two pointers to its string: one to be modified 
+       by ExTree_traverse_post_order() and one kept intact, out of harm's way.
     */
     if (!ex_tree){
         return NULL;
@@ -116,13 +184,16 @@ static char *ExTree_traverse_postorder(ExTree ex_tree, char **string_ref){
     ExTree_traverse_postorder(ex_tree->right, string_ref);
 
     // copy the token in the current tree node into the array
-    // precede it  with white space
+    int32_t copied = str_copy(*string_ref, ex_tree->token);
+    // str_copy() returns the index in string_ref where it finished copying
+    // the token, +1; so if the token is 2 chars-long, the returned value will be
+    // 2, having copied one char into index0, one into index1, and stopped at 2,
+    // which is what it then returns
+    (*string_ref)+= copied;     // move to the next index available for subsequent insertions
+
+    // follow it with white space
     *(*string_ref) = ' ';
     (*string_ref)++;    // move forward in the string;
-    // how many characters the token consisted of+1 (when the token string reached NULL,
-    // and the index stopped incrementing in str_copy())
-    int32_t copied = str_copy(*string_ref, ex_tree->token);
-    (*string_ref)+= copied;
 
     // return a pointer in the newly formed expression, where the computing left off
     // the whole expression ahs been computed. The caller should use this poimnter
@@ -132,7 +203,11 @@ static char *ExTree_traverse_postorder(ExTree ex_tree, char **string_ref){
 
 
 static char *ExTree_traverse_preorder(ExTree ex_tree, char **string_ref){
-    /* This modifies the string that string_ref points to back in caller space.
+    /* Traverse ex_tree in pre-order and build a char array based on its 
+       nodes. Since the traversal is pre-order, the result will be an
+       expression in prefix notation.
+       
+       This modifies the string that string_ref points to back in caller space.
        Thus the caller should mainting two pointers to its string. 
 
        One to be modified by ExTree_traverse_preorder() and one kept intact,
@@ -143,31 +218,40 @@ static char *ExTree_traverse_preorder(ExTree ex_tree, char **string_ref){
     }
 
     // copy the token in the current tree node into the array
-    // precede it with white space 
+    int32_t copied = str_copy(*string_ref, ex_tree->token);
+    // str_copy() returns the index in string_ref where it finished copying
+    // the token, +1; so if the token is 2 chars-long, the returned value will be
+    // 2, having copied one char into index0, one into index1, and stopped at 2,
+    // which is what it then returns
+    (*string_ref)+= copied;     // move to the next index available for subsequent insertions
+ 
+
+    // follow it with white space 
     *(*string_ref) = ' ';
     (*string_ref)++;    // move forward in the string;
-    // how many characters the token consisted of+1 (when the token string reached NULL,
-    // and the index stopped incrementing in str_copy())
-    int32_t copied = str_copy(*string_ref, ex_tree->token);
-    (*string_ref)+= copied;
 
     // return a pointer in the newly formed expression, where the computing left off
-    // the whole expression ahs been computed. The caller should use this poimnter
-    // to insert a NULL there and terminate the string
+    // the whole expression has been computed. The caller should decrement this pointer
+    // and insert a NULL there to terminate the string (i.e. the previous character is
+    // white space, and that's where the NUL should be inserted, since the string ends here)
     ExTree_traverse_preorder(ex_tree->left, string_ref);
     ExTree_traverse_preorder(ex_tree->right, string_ref);
 
     return *string_ref;
 }
 
+
+
 // declaration here because it's used in the following function; (defined in down below in
 // the file, in another section)
 static bool ExP_is_operator(char the_char);
 
 static char *ExTree_traverse_inorder(ExTree ex_tree, char **string_ref){
-    /* This modifies the string that string_ref points to back in caller space.
-       Thus the caller should mainting two pointers to its string. 
+    /* Traverse ex_tree in-order, building an infix expression stored in
+       *string_ref.
 
+       This modifies the string that string_ref points to back in caller space.
+       Thus the caller should mainting two pointers to its string. 
        One to be modified by ExTree_traverse_preorder() and one kept intact,
        out of harm's way.
     */
@@ -209,6 +293,43 @@ static char *ExTree_traverse_inorder(ExTree ex_tree, char **string_ref){
 
 
 
+static void ExTree_cut_down(ExTree tree){
+    /* Recursively free all memory allocated to tree.
+
+       Meant to be called by ExTree_destroy().
+    */
+    if (tree == NULL){
+        return;
+    }
+    ExTree_cut_down(tree->left);
+    ExTree_cut_down(tree->right);
+
+    free(tree);
+    return;
+}
+
+
+static void ExTree_destroy(ExTreeWrapper *tree_wrapper_ref){
+    /* Free all heap memory associated with *tree_wrapper_ref
+       then set tree_wrapper_ref to NULL.
+    */
+    if (tree_wrapper_ref == NULL){  // nothing to do
+        return;
+    }
+    if (*tree_wrapper_ref == NULL){
+        tree_wrapper_ref = NULL;
+        return;
+    }
+    else{
+        ExTree_cut_down((*tree_wrapper_ref)->expression_tree);
+        free((*tree_wrapper_ref)->expression_string);
+        free(*tree_wrapper_ref);
+        
+        *tree_wrapper_ref = NULL;
+    }
+}
+
+
 
 /*               * * * ExP functions * * *                         */
 
@@ -242,42 +363,44 @@ static bool ExP_is_operator(char the_char){
 }
 
 
-static char *ExP_eval(char *operator, char *left_operand, char *right_operand){
+static int32_t ExP_eval(char *operator, int32_t left_operand, int32_t right_operand){
+// PV: static char *ExP_eval(char *operator, char *left_operand, char *right_operand)
     /* Evaluate the expression consisting of the two operands and
        operator and return the result.
-
-       The arguments are all char arrays, so is the return value. They're 
-       first converted to integers (the operands) and then evaluated 
-       and the result stored in a variable. 
-       Before returning,  the variable is converted to a char pointer (array).
+    
+       The operands are int32_t integers. The calling function has to convert its
+       data, if it's in char-array format instead, to int32_t types by calling
+       str_to_int().
     */
-    int result;
+    int32_t result;
     switch (operator[0]){
         case '+':
-            result = str_to_int(left_operand) + str_to_int(right_operand); 
+            result = left_operand + right_operand; 
+            //PV: result = str_to_int(left_operand) + str_to_int(right_operand); 
             break;  
 
         case '-':
-            result = str_to_int(left_operand) - str_to_int(right_operand); 
+            result = left_operand - right_operand; 
             break;
 
         case '*':
         case 'x':
-            result = str_to_int(left_operand) * str_to_int(right_operand); 
+            result = left_operand * right_operand; 
             break;
 
         case '/':
-            result = str_to_int(left_operand) / str_to_int(right_operand); 
+            result = left_operand / right_operand; 
             break;
 
         case '^':   // exponentiation
-            result = str_to_int(left_operand) << str_to_int(right_operand); 
+            result = left_operand << right_operand; 
 
         default:
             return false;
             break;
     }
-    return str_from_int(result);
+     // PV: return str_from_int(result);
+    return result;
 
 }
 
@@ -289,7 +412,8 @@ static char *ExP_refine(char *unformatted, ex_notation NOTATION){
        Return this 'refined' array to the caller for safe parsing.
        Called to 'sanitize' the input to be fed to ExP_tokenize().
     */
-      char *refined = malloc(sizeof(char) * 2*str_len(unformatted));
+    int32_t size = 2*str_len(unformatted);
+    char *refined = calloc(size, sizeof(char));     // allocate and initialize everything to 0
         if (!refined){
             return NULL;
         }
@@ -379,7 +503,7 @@ static char *ExP_tokenize(char string_arg[], char delimiter){
         if (input_string[index] == delimiter){
             res = token; 
             input_string[index] = '\0';  // replace the delimiter with a NUL, to terminate the string (token) here
-            token = &input_string[index+1];
+            token = &input_string[index+1]; // make token point to the first char after NULL
             index++;
 
             return res;
@@ -399,10 +523,10 @@ static char *ExP_tokenize(char string_arg[], char delimiter){
 
 
 
-// returns an ExTree object, which is an expression tree.
-static ExTree ExP_parse_postfix(char postfix_expression[]){
+static ExTreeWrapper ExP_parse_postfix(char postfix_expression[]){
     /* Parse postfix_expression and build an expression 
-       tree out of it and return that. 
+       tree out of it. Wrap the expression tree inside
+       an ExTreeWrapper, and return that.
 
        postfix_expression is assumed to be a valid 
        expression in polish postfix notation. The first
@@ -423,12 +547,18 @@ static ExTree ExP_parse_postfix(char postfix_expression[]){
     Stack operands_stack;
     Stack_init(&operands_stack);
 
-    ExTree result = NULL;
-
     postfix_expression = ExP_refine(postfix_expression, POSTFIX); 
+
+    // ExTree wrapper with a pointer to an exp tree and a pointer to the expression char
+    // array it's based on -- tracks both for deallocation purposes
+    ExTreeWrapper tree_wrapper;
+    ExTree_init(&tree_wrapper, postfix_expression);
+
+    ExTree result = NULL;
     char *current = ExP_tokenize(postfix_expression, ' ');
 
     while(current){
+        // current is an operand
         if(!ExP_is_operator(current[0])){
             // make current a new tree with no children
             ExTree new = ExTree_new(current);
@@ -446,7 +576,6 @@ static ExTree ExP_parse_postfix(char postfix_expression[]){
             // get the children from the stack
             ExTree right_operand = Stack_pop(operands_stack);
             ExTree left_operand = Stack_pop(operands_stack);
-             // result = ExP_eval(current, left_operand, right_operand);
             
             // assign the children to the parent tree
             new_tree = ExTree_insert_right(new_tree, right_operand);
@@ -461,7 +590,8 @@ static ExTree ExP_parse_postfix(char postfix_expression[]){
         }
     }
     Stack_destroy(&operands_stack);
-    return result; 
+    tree_wrapper->expression_tree = result; 
+    return tree_wrapper; 
 }
 
 
@@ -496,8 +626,8 @@ static void ExP_prefix_build_et(ExTree *tree_ref, char *token){
             // because the first operand found is the left operand, the next one the right one
 
             //arguments: 1) a pointer to the 'left' pointer field  of the tree pointer
-            //that tree_ref pointers to (pretty difficult to succintly explain)
-            // 2) a call to ExP_tokenize which returns the next token in the expression
+            //that tree_ref points to (pretty difficult to succintly explain)
+            // 2) a call to ExP_tokenize() which returns the next token in the expression
             ExP_prefix_build_et(&(*tree_ref)->left, ExP_tokenize(NULL, ' '));
             // recurse and go down the right child node in *tree_ref
             ExP_prefix_build_et(&(*tree_ref)->right, ExP_tokenize(NULL, ' '));
@@ -507,9 +637,10 @@ static void ExP_prefix_build_et(ExTree *tree_ref, char *token){
 
 
 
-static ExTree ExP_parse_prefix(char* exp){
-    /* Parse prefix_expression and build an expression 
-       tree out of it and return that. 
+static ExTreeWrapper ExP_parse_prefix(char* exp){
+    /* Parse the prefix expression exp and build an expression 
+       tree out of it. Wrap the expression tree inside
+       an ExTreeWrapper, and return that.
 
        prefix_expression is assumed to be a valid 
        expression in prefix notation. The first
@@ -529,16 +660,22 @@ static ExTree ExP_parse_prefix(char* exp){
     */
       
     // if the current char in exp is NULL : end of the expression 
-    
     exp = ExP_refine(exp, PREFIX);
     if (!exp){
         return NULL;
     }
+    // declare and initialize a tree wrapper that tracks exp and the exp tree that will be
+    // built from it, for deallocation purposes
+    ExTreeWrapper tree_wrapper;
+    ExTree_init(&tree_wrapper, exp);
+
     char *token = ExP_tokenize(exp, ' ');
-    ExTree expression_tree = NULL;
-    ExP_prefix_build_et(&expression_tree, token);
+    ExP_prefix_build_et(&tree_wrapper->expression_tree, token);
+
+    // the refined expression string: no longer needed
+     // free(exp);
     
-    return expression_tree;
+    return tree_wrapper;
 } 
   
  
@@ -554,23 +691,25 @@ int32_t ExP_compute(char expression[], ex_notation NOTATION){
        then traverse this tree and evaluate the expression,
        then return the computed result.
     */
-    char *res = NULL;
+    int32_t res = 0;
 
 
     switch(NOTATION){
 
         case(PREFIX):
         {
-            ExTree expression_tree = ExP_parse_prefix(expression);
-            res = ExTree_traverse(expression_tree); 
+            ExTreeWrapper expression_tree_wrapper = ExP_parse_prefix(expression);
+            res = ExTree_traverse(expression_tree_wrapper->expression_tree);
+            ExTree_destroy(&expression_tree_wrapper);
             break;
         }
 
         case(POSTFIX):
         {
-           ExTree expression_tree = ExP_parse_postfix(expression);
-           res = ExTree_traverse(expression_tree); 
-           break;
+            ExTreeWrapper expression_tree_wrapper = ExP_parse_postfix(expression);
+            res = ExTree_traverse(expression_tree_wrapper->expression_tree);
+            ExTree_destroy(&expression_tree_wrapper);
+            break;
        }
 
         default:
@@ -582,7 +721,7 @@ int32_t ExP_compute(char expression[], ex_notation NOTATION){
     if (!res){
         return -1;
     }else{
-        return str_to_int(res);
+        return res;
     }
 }
 
@@ -592,6 +731,10 @@ char *ExP_to_postfix(char expression[]){
     /* Convert from prefix to postfix */
     // make it twice the size of expression, to play it safe and be able to add proper
     // spacing
+
+    if (!expression){
+        return NULL;
+    }
     uint8_t size = str_len(expression) * 2;
 
     // this pointer will be changed by ExTree_traverse_postorder()
@@ -604,21 +747,16 @@ char *ExP_to_postfix(char expression[]){
         return NULL;
     }
 
-    ExTree expression_tree = ExP_parse_prefix(expression);
-    ExTree_traverse_postorder(expression_tree, &changeable);
+    ExTreeWrapper expression_tree_wrapper = ExP_parse_prefix(expression);
+    ExTree_traverse_postorder(expression_tree_wrapper->expression_tree, &changeable);
 
-    // changeable will at this point point to where a terminating null needs to be
-    // inserted.
-    *changeable= '\0';
+    ExTree_destroy(&expression_tree_wrapper);
 
-    // intact was left intact, so it sstill points to the start of the string
-    //but
-    // since ExTree_traverse_preorder (and postorder) insert a whitespace char before
-    // every token in the expression tree, the first char in the string will be
-    // whitespace.
-    // remove that
-    intact++;
-
+    // changeable will at this point point to where traverse_postorder() left off : a
+    // white space was inserted at n, then changeable was incremented to n+1. 
+    // Thus the string actually ends at n, so a NUL has to be inserted there
+    *(--changeable) = '\0';     // decrement changeable and set the char at that index to NUL
+ 
     return intact;
 }
 
@@ -643,17 +781,17 @@ char *ExP_to_prefix(char expression[]){
         return NULL;
     }
 
-    ExTree expression_tree = ExP_parse_postfix(expression);
-    ExTree_traverse_preorder(expression_tree, &changeable);
+    // parse an expression in postfix notation and produce (return) an expression tree
+    ExTreeWrapper  expression_tree_wrapper = ExP_parse_postfix(expression);
+    // traverse this tree in preorder, which wil produce a prefix expression
+    ExTree_traverse_preorder(expression_tree_wrapper->expression_tree, &changeable);
 
-    // changeable will at this point point to where a terminating null needs to be
-    // inserted.
-    *changeable= '\0';
-    // since ExTree_traverse_preorder (and postorder) insert a whitespace char before
-    // every token in the expression tree, the first char in the string will be
-    // whitespace.
-    // remove that
-    intact++;
+    ExTree_destroy(&expression_tree_wrapper);
+
+    // changeable will at this point point to where traverse_preorder() left off : a
+    // white space was inserted at n, then changeable was incremented to n+1. 
+    // Thus the string actually ends at n, so a NUL has to be inserted there
+    *(--changeable) = '\0';     // decrement changeable and set the char at that index to NUL
 
     // intact was left intact, so it sstill points to the start of the string
     return intact;
@@ -677,23 +815,21 @@ char *ExP_to_infix(char expression[], ex_notation NOTATION){
         return NULL;
     }
     
-    ExTree expression_tree = NULL;
+    ExTreeWrapper expression_tree_wrapper;
+
     if (NOTATION == PREFIX){
-        expression_tree = ExP_parse_prefix(expression);
+        expression_tree_wrapper = ExP_parse_prefix(expression);
     }else if (NOTATION == POSTFIX){
-        expression_tree = ExP_parse_postfix(expression);
+        expression_tree_wrapper = ExP_parse_postfix(expression);
     }
-    ExTree_traverse_inorder(expression_tree, &changeable);
+    ExTree_traverse_inorder(expression_tree_wrapper->expression_tree, &changeable);
 
-    // changeable will at this point point to where a terminating null needs to be
+    ExTree_destroy(&expression_tree_wrapper);
+
+    // changeable points to where traverse_inorder() left off. i.e. where NULL has to be
     // inserted.
-    *changeable= '\0';
-    // since ExTree_traverse_preorder (and postorder) insert a whitespace char before
-    // every token in the expression tree, the first char in the string will be
-    // whitespace.
-    // remove that
-    intact++;
-
+    *changeable = '\0';
+    
     // intact was left intact, so it sstill points to the start of the string
     return intact;
 }
