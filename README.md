@@ -5,8 +5,8 @@ Parse, compute, and convert between pre,in, and post-fix notation expressions
 *EXAMPLES*
 
 INPUT: 1 * 2 + 3 / 4<br>
-POSTFIX: 1 2 * 3 4 / +
-PREFIX + * 1 2 / 3 4
+POSTFIX: 1 2 * 3 4 / + <br>
+PREFIX + * 1 2 / 3 4 <br>
 <br>
 <br>
 INPUT: 1 * (2 + 3 / 4)<br>
