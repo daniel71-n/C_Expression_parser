@@ -356,11 +356,68 @@ static bool ExP_is_operator(char the_char){
             return true;
             break;
 
+        case '^':
+            return true;
+            break;
+
+        // for the purposes of parsing infix expressions, the parenthesis
+        // is considered an operator and so true is returned upon testing
+        case '(':
+        case ')':
+            return true;
+            break;
+
         default:
             return false;
             break;
     }
 }
+
+
+
+static uint8_t ExP_get_precedence(char *operator){
+    /*Look up the precedence for operator, and return that. 
+      Meant to be called from ExP_has_higher_precedence().
+
+    */
+    uint8_t precedence = 0;
+    switch (operator[0]){
+
+        case '+':
+        case '-':
+            precedence = 1;
+            break;
+
+        case '*':
+        case 'x':
+        case '/':
+            precedence = 2;
+            break;
+
+        case '^':
+            precedence = 3;
+            break;
+    }
+    return precedence;
+}
+
+
+static bool ExP_has_higher_precedence(char *operator1, char *operator2){
+    /* Return true if operator1 has higher precedence than operator2,
+       else false.
+    */
+    return (ExP_get_precedence(operator1) > ExP_get_precedence(operator2)) ? true : false;
+}
+
+
+static bool ExP_has_same_precedence(char *operator1, char *operator2){
+    /* Return true if operator1 and operator2 have the same precedence,
+       lse otherwise.
+    */
+    return (ExP_get_precedence(operator1) == ExP_get_precedence(operator2)) ? true : false;
+}
+
+
 
 
 static int32_t ExP_eval(char *operator, int32_t left_operand, int32_t right_operand){
@@ -421,6 +478,7 @@ static char *ExP_refine(char *unformatted, ex_notation NOTATION){
     uint32_t ind_refined = 0;   // track the position in the 'refined' array
     refined[ind_refined] = '\0';    // initialize to NUL
 
+
     for (uint32_t i = 0; unformatted[i] != '\0'; i++){
 
         if(unformatted[i] == ' '){
@@ -431,7 +489,11 @@ static char *ExP_refine(char *unformatted, ex_notation NOTATION){
             }
         }
 
-        else if(ExP_is_operator(unformatted[i])){
+        // if current is operator or parenthesis, make sure it has white space before and
+        // after
+        else if(ExP_is_operator(unformatted[i]) || \
+                (unformatted[i] == '(' || unformatted[i] == ')')
+                ){
             //add space before it if there's no space at that index in the array already
             //added. no out-of-bounds error can occur since the left-most element is 
             //always an operand in a valid postfix expression 
@@ -595,6 +657,157 @@ static ExTreeWrapper ExP_parse_postfix(char postfix_expression[]){
 }
 
 
+
+static char *ExP_infix_shunt(char infix_exp[]){
+    /* Turn infix expression into a postfix expression
+       using the shunting-yard algorithm.
+
+       Once in postfix notation, this can either be returned as is,
+       if the request if for the conversion of an infix-notation
+       expression into a postfix-notation expression, 
+       or the postfix-notation functions can be called 
+       to deal with the newly-obtained postfix expression
+       in order to build a syntax tree out of it and/or
+       to convert it to a prefix-notation string.
+       
+       infix_expression is assumed to be a valid infix-notation
+       expression. 
+       Operands must be white-space separated, but there's no
+       such requirement between operands or an operand and 
+       and an operator or anything and parentheses.
+
+       The infix_expression argument is a string, and as such
+       it has to be Nul-terminated, or it's not valid input.
+    
+       The value returned is a dynamically-allocated char array.
+       The caller is responsible for freeing it when no longer
+       needed.
+    */
+    Stack operators_stack;
+    Stack_init(&operators_stack);
+    
+    // string for str_tokenize() to operate on and modify; used as the 'input' string
+    char *refined_ex = ExP_refine(infix_exp, INFIX); 
+    // use infix_expression as the output string i.e. for writing the new, resultant postfix expression.
+
+    // allocate memory for a new array, double the size of the string argument, to play it
+    // safe, since white space is going to be added
+    // this is what's going to be returned at the end
+    char *infix_expression = malloc(sizeof(char) * str_len(infix_exp) *2);
+    if (!infix_expression){
+        return NULL;
+    }
+    // index is used to track the current position in infix_expression (aforementioned)
+    char *index = infix_expression;
+
+    char *current = ExP_tokenize(refined_ex, ' ');
+
+    ////////////////////////////// PARSE ///////////////////////////
+
+    while(current != NULL){
+        // current is an operand, copy it to the output
+        if(!ExP_is_operator(current[0])){
+            index += str_copy(index, current);
+            
+            current = ExP_tokenize(NULL, ' '); 
+        }
+
+        else{// if current is an operator
+            
+            // if the stack is empty, or if current is a left parenthesis, or if the
+            // top of the stack is a left parenthesis, push current onto the stack
+            if (Stack_count(operators_stack) == 0 || \
+                    *current == '(' || \
+                    *(char *)Stack_peek(operators_stack) == '(' \
+                ){
+                StackItem new = Stack_make_item(current);
+                Stack_push(operators_stack, new);
+
+                current = ExP_tokenize(NULL, ' ');
+            }
+            // if current is a right parenthesis, pop from the stack until a matching left
+            // parenthesis is found, sending everything in between the parentheses to the
+            // output
+            else if (current[0] == ')'){
+                while (true){
+                    char *popped = Stack_pop(operators_stack);
+                    if (*popped == '('){
+                        break;
+                    }
+                    index += str_copy(index, popped);
+                    // add whitespace
+                    *index = ' ';
+                    index++;
+                }
+                current = ExP_tokenize(NULL, ' ');
+                }
+
+            // if current has higher precedence than the top of the stack
+            // push it onto the stack. Left-associativity is assumed
+            else if (ExP_has_higher_precedence(current, (char *)Stack_peek(operators_stack))){
+                StackItem new = Stack_make_item(current);
+                Stack_push(operators_stack, new);
+
+                current = ExP_tokenize(NULL, ' ');
+            }
+            // else if the top of the stack and current have the same precedence (left
+            // associativity is assumed) or the top of the stack has higher 
+            // precedence than current, pop from the stack and write to the output
+            // string until that's no longer the case
+            else if (!ExP_has_higher_precedence(current, (char *)Stack_peek(operators_stack))){
+                while (true){
+                    char *popped = Stack_pop(operators_stack);
+                    index += str_copy(index, popped);
+                    // add whitespace as well
+                    *index = ' ';
+                    index++;
+
+                    // stop popping when the condition becomes false, i.e. a
+                    // lower-precedence top-of-the-stack is found or the stack is empty
+                    if ((!Stack_count(operators_stack)) || \
+                        (ExP_has_higher_precedence(current, (char *)Stack_peek(operators_stack))) || \
+                        (*(char *)Stack_peek(operators_stack) == '(') \
+                        ){
+                        break;
+                    }
+                }
+                // it's safe now to push current onto the stack
+                StackItem new = Stack_make_item(current);
+                Stack_push(operators_stack, new);
+
+                current = ExP_tokenize(NULL, ' ');
+            } 
+        }
+        // add whitespace after evey single token, if the previous char isn't white space
+        // but only if it's not the first index in the string
+        if (index != infix_expression && *(index-1) != ' '){
+            *index = ' ';
+            index++;
+        }
+    }
+    // the loop is finished, current is NULL: the expression has been parsed
+    // if there are any operators left over on the stack, pop them all and write
+    // them to the output string
+    while (Stack_count(operators_stack)){
+        index += str_copy(index, (char *)Stack_pop(operators_stack));
+        // add white space after each operator as well
+        *index = ' ';
+        index++;
+    }
+    // NULL - terminate the output string; the char at the previous index is whitespace,
+    // so put the NUL there
+    *(--index) = '\0';
+
+    // free the allocated memory: the operator stack, the 'input' string
+    Stack_destroy(&operators_stack);
+    free(refined_ex);
+
+    return infix_expression;
+}
+
+
+
+
 static void ExP_prefix_build_et(ExTree *tree_ref, char *token){
     /* Called from inside ExP_parse_prefix(). 
 
@@ -712,6 +925,17 @@ int32_t ExP_compute(char expression[], ex_notation NOTATION){
             break;
        }
 
+        case(INFIX):
+        {
+            // first convert infix to postfix, then handle the postfix expression
+            char *postfix = ExP_infix_shunt(expression);
+            ExTreeWrapper expression_tree_wrapper = ExP_parse_postfix(postfix);
+            res = ExTree_traverse(expression_tree_wrapper->expression_tree);
+            ExTree_destroy(&expression_tree_wrapper);
+            break;
+       }
+
+
         default:
         {
             printf("Function incorrectly called.\n");
@@ -727,37 +951,62 @@ int32_t ExP_compute(char expression[], ex_notation NOTATION){
 
 
 
-char *ExP_to_postfix(char expression[]){
-    /* Convert from prefix to postfix */
+char *ExP_to_postfix(char expression[], ex_notation NOTATION){
+    /* Convert expression to postfix expression.
+       Expression is either a prefix or infix expression.
+    */
     // make it twice the size of expression, to play it safe and be able to add proper
     // spacing
 
     if (!expression){
         return NULL;
     }
-    uint8_t size = str_len(expression) * 2;
+   
+    switch (NOTATION){
+        case INFIX:
+            {
+                // if expression is in infix notation, don't build a parse tree for the
+                // conversion to postfix, but simply return the postfix expression obtained 
+                // with the shunting yard algorithm
+                return ExP_infix_shunt(expression);
+                break; // not needed
+            }
 
-    // this pointer will be changed by ExTree_traverse_postorder()
-    // so a second pointer, left intact, pointing to the start of the string, is needed
-    char *changeable = malloc(sizeof(char) * size); 
-    char *intact = changeable;
+        case POSTFIX:
+            {
+                // the expression is already in postfix notation. return it without doing
+                // anything else
+                return expression;
+                break;
+            }
+
+        case PREFIX:
+            {
+                uint8_t size = str_len(expression) * 2;
+
+                // this pointer will be changed by ExTree_traverse_postorder()
+                // so a second pointer, left intact, pointing to the start of the string, is needed
+                char *changeable = malloc(sizeof(char) * size); 
+                char *intact = changeable;
 
 
-    if(!changeable){
-        return NULL;
+                if(!changeable){
+                    return NULL;
+                }
+
+                ExTreeWrapper expression_tree_wrapper = ExP_parse_prefix(expression);
+                ExTree_traverse_postorder(expression_tree_wrapper->expression_tree, &changeable);
+
+                ExTree_destroy(&expression_tree_wrapper);
+
+                // changeable will at this point point to where traverse_postorder() left off : a
+                // white space was inserted at n, then changeable was incremented to n+1. 
+                // Thus the string actually ends at n, so a NUL has to be inserted there
+                *(--changeable) = '\0';     // decrement changeable and set the char at that index to NUL
+             
+                return intact;
+            }
     }
-
-    ExTreeWrapper expression_tree_wrapper = ExP_parse_prefix(expression);
-    ExTree_traverse_postorder(expression_tree_wrapper->expression_tree, &changeable);
-
-    ExTree_destroy(&expression_tree_wrapper);
-
-    // changeable will at this point point to where traverse_postorder() left off : a
-    // white space was inserted at n, then changeable was incremented to n+1. 
-    // Thus the string actually ends at n, so a NUL has to be inserted there
-    *(--changeable) = '\0';     // decrement changeable and set the char at that index to NUL
- 
-    return intact;
 }
 
 
@@ -765,10 +1014,11 @@ char *ExP_to_postfix(char expression[]){
 
 
 
-char *ExP_to_prefix(char expression[]){
-    /* Convert from prefix to postfix */
+char *ExP_to_prefix(char expression[], ex_notation NOTATION){
+    /* Convert expression to postfix */
     // make it twice the size of expression, to play it safe and be able to add proper
     // spacing
+
     uint8_t size = str_len(expression) * 2;
 
     // this pointer will be changed by ExTree_traverse_postorder()
@@ -780,6 +1030,12 @@ char *ExP_to_prefix(char expression[]){
     if(!changeable){
         return NULL;
     }
+    /////////////////////////////////////////////////////////////////////////////////
+    // if NOTATION is infix, first convert it to postfix notation, then do the below as is
+    if (NOTATION == INFIX){
+        expression = ExP_infix_shunt(expression);
+    }
+    /////////////////////////////////////////////////////////////////////////////////
 
     // parse an expression in postfix notation and produce (return) an expression tree
     ExTreeWrapper  expression_tree_wrapper = ExP_parse_postfix(expression);
@@ -799,7 +1055,9 @@ char *ExP_to_prefix(char expression[]){
 
 
 char *ExP_to_infix(char expression[], ex_notation NOTATION){
-    /* Convert from expression to postfix */
+    /* Convert expression to Infix. 
+        expression is either a prefix or postfix notation expression.
+    */
 
     // make it twice the size of expression, to play it safe and be able to add proper
     // spacing
@@ -814,7 +1072,8 @@ char *ExP_to_infix(char expression[], ex_notation NOTATION){
     if(!changeable){
         return NULL;
     }
-    
+   
+    // build a syntax tree out of expression
     ExTreeWrapper expression_tree_wrapper;
 
     if (NOTATION == PREFIX){
@@ -822,8 +1081,10 @@ char *ExP_to_infix(char expression[], ex_notation NOTATION){
     }else if (NOTATION == POSTFIX){
         expression_tree_wrapper = ExP_parse_postfix(expression);
     }
+    // traverse  the syntax tree in-order, to produce an infix-notation expression
     ExTree_traverse_inorder(expression_tree_wrapper->expression_tree, &changeable);
-
+    // free the memory associated with the syntax tree, as well as the refined syntax
+    // expression it's based on
     ExTree_destroy(&expression_tree_wrapper);
 
     // changeable points to where traverse_inorder() left off. i.e. where NULL has to be
